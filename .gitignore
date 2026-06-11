@@ -1,2 +1,8 @@
 quartus/ldh_projeto_final_assignment_defaults.qdf
 quartus/db
+quartus/incremental_db
+quartus/timing/stamp
+quartus/board/ibis
+quartus/output_files
+quartus/simulation/modelsim
+
