@@ -11,7 +11,7 @@
 
 Este projeto implementa uma cadeia completa de processamento de áudio em FPGA, utilizando o kit **DE10-Lite** (Intel MAX10) e a ferramenta **Quartus Prime Lite 18.1**. O objetivo é integrar três blocos digitais desenvolvidos em Verilog:
 
-```
+```text
 Entrada analógica
       │
       ▼
@@ -62,10 +62,8 @@ Cada aluno é responsável por **um bloco principal**, entregue via Pull Request
 │   └── dac_spi/
 │       └── spi_dac_driver.v   ← driver SPI para o MCP4921          [Aluno 3]
 ├── tb/
-│   ├── tb_adc_wrapper.v
-│   ├── tb_fir_notch.v
-│   ├── tb_spi_dac.v
-│   └── tb_top.v
+│   ├── tb_fir_notch.v      ← simulação funcional exigida
+│   └── tb_spi_dac.v        ← simulação funcional exigida
 ├── quartus/
 │   ├── projeto_final.qpf
 │   ├── projeto_final.qsf      ← pin assignments DE10-Lite
@@ -80,7 +78,7 @@ Cada aluno é responsável por **um bloco principal**, entregue via Pull Request
 
 | Aluno | Bloco | Arquivos principais | Testbench |
 |-------|-------|---------------------|-----------|
-| 1 | ADC Wrapper | `rtl/adc/adc_wrapper.v` | `tb/tb_adc_wrapper.v` |
+| 1 | ADC Wrapper | `rtl/adc/adc_wrapper.v` | — (validado em hardware) |
 | 2 | Filtro FIR Notch 60 Hz | `rtl/fir/fir_notch.v`, `scripts/gen_fir_coeffs.py` | `tb/tb_fir_notch.v` |
 | 3 | Driver SPI MCP4921 | `rtl/dac_spi/spi_dac_driver.v` | `tb/tb_spi_dac.v` |
 
@@ -90,6 +88,13 @@ Cada aluno deve abrir **pelo menos um Pull Request** que inclua o módulo RTL e 
 
 ## Especificações Técnicas por Bloco
 
+> As interfaces de módulo, a arquitetura do FIR e os diagramas a seguir são
+> **sugestões de ponto de partida** — não uma estrutura obrigatória. Cada aluno
+> pode propor uma organização diferente (nomes de sinais, número de
+> registradores, máquina de estados, etc.), desde que o módulo cumpra a função
+> especificada e respeite a largura de dados (12 bits) e o protocolo
+> `valid`/`ready` entre os blocos.
+
 ### Bloco 1 — ADC Wrapper (Aluno 1)
 
 - Instanciar o IP **Modular ADC Core** do MAX10 via IP Catalog do Quartus
@@ -97,6 +102,25 @@ Cada aluno deve abrir **pelo menos um Pull Request** que inclua o módulo RTL e 
 - Canal ADC: livre (utilizar qualquer entrada analógica disponível no conector J7)
 - Interface de saída: dado de 12 bits válido com sinal `valid` de 1 pulso por amostra
 - O sinal `valid` dispara o pipeline downstream (FIR e SPI DAC)
+
+#### Dicas de Instanciação do IP do ADC (MAX10)
+
+- No Quartus, abra o **IP Catalog** e procure por **"ADC Intel FPGA IP"**
+  (categoria *Processors and Peripherals → ADC*, também chamada de "Modular ADC").
+- A IP do ADC do MAX10 exige um **clock dedicado** dentro de uma faixa
+  específica de frequência (ver *MAX10 ADC User Guide*) — normalmente é preciso
+  gerar esse clock a partir do clock de 50 MHz da placa usando uma **PLL**
+  (IP Catalog → *I/O → PLL Intel FPGA IP*).
+- Configure o **sequenciador** da IP para converter apenas o(s) canal(is)
+  escolhido(s) (CH0–CH7).
+- Após o reset, a IP leva alguns ciclos para concluir a calibração interna —
+  aguarde o término dessa calibração antes de considerar as amostras válidas.
+- A interface de saída da IP expõe sinais no estilo Avalon-ST (`response_valid`,
+  `response_data`, `response_channel`); o wrapper deste bloco deve traduzir isso
+  para a interface simplificada `adc_data`/`adc_valid` usada pelo restante da
+  cadeia.
+- O exemplo "ADC" dos demos do DE10-Lite (pacote da Terasic) é uma boa
+  referência de instanciação e pinagem.
 
 **Interface sugerida do módulo:**
 ```verilog
@@ -112,9 +136,51 @@ module adc_wrapper (
 
 - Tipo: FIR simétrico (fase linear) com notch centrado em **60 Hz**
 - Frequência de amostragem: **48 kHz**
-- Ordem mínima recomendada: **64 taps** (ordem 63); quanto maior, mais profundo o notch
+- Ordem: **16 taps** (apenas **8 coeficientes únicos**, graças à simetria de fase linear)
 - Coeficientes: gerados pelo script `scripts/gen_fir_coeffs.py` (ver abaixo) e declarados em `coeff_pkg.vh`
-- Aritmética interna: inteiros com largura suficiente para evitar overflow (os coeficientes são escalados para inteiros de 16 bits com sinal)
+- Aritmética interna: inteiros com largura suficiente para evitar overflow (coeficientes escalados para inteiros de 16 bits com sinal)
+
+> **Sobre a ordem reduzida:** com apenas 16 taps o notch fica mais largo e raso
+> do que em um filtro de ordem alta — funciona mais como uma atenuação suave de
+> baixas frequências do que um corte cirúrgico exatamente em 60 Hz. Para os
+> objetivos da disciplina (implementação digital, não fidelidade de áudio), isso
+> é aceitável e torna o projeto muito mais tratável: os 8 coeficientes podem ser
+> conferidos um a um durante a simulação.
+
+#### Arquitetura sugerida (MAC sequencial com simetria)
+
+A 48 kHz com clock de 50 MHz há **~1040 ciclos de clock por amostra** — tempo de
+sobra para processar os 8 pares de coeficientes **sequencialmente**, com um único
+somador/multiplicador reaproveitado (em vez de 16 multiplicadores em paralelo):
+
+```text
+                ┌───────────────────────────────────────────────────┐
+                │     Linha de atraso: 16 registradores (shift reg)   │
+   x[n] ───────►│  x0  x1  x2  x3  ...  x6  x7  x8  x9 ... x14  x15   │
+                └──────┬───────────────────────────────────┬─────────┘
+                       │ x[k]                       x[15-k] │
+                       ▼                                     ▼
+                 ┌───────────┐                       ┌─────────────┐
+                 │  mux(k)   │◄──── contador k ─────►│  mux(15-k)  │
+                 └─────┬─────┘     (0..7, avança      └──────┬──────┘
+                       │             1x por ciclo)            │
+                       └─────────────► soma ◄──────────────────┘
+                                         │  (xk + x[15-k])
+                                         ▼
+                              shift-add  ×  h[k]   (1 ciclo, h[k] de uma ROM)
+                                         │
+                                         ▼
+                                  acumulador: acc += produto
+                                         │
+                          k == 7 ?  ──► sim ──► y[n] = acc ; acc = 0 ; k = 0
+                              │
+                              └────► não ──► k = k + 1
+```
+
+A cada amostra nova vinda do ADC: desloca a linha de atraso, percorre `k = 0..7`
+somando os pares simétricos `x[k] + x[15-k]`, multiplica pelo coeficiente `h[k]`
+(via shift-add) e acumula. Ao final do laço (`k==7`), `acc` é a amostra filtrada
+`y[n]`.
 
 **Interface sugerida do módulo:**
 ```verilog
@@ -128,7 +194,10 @@ module fir_notch (
 );
 ```
 
-**Bônus — Implementação Shift-Add:** Em vez de usar multiplicadores genéricos (`*`), implementar as multiplicações por coeficientes usando apenas deslocamentos (`<<`, `>>`) e somas. Isso economiza recursos de DSP no FPGA e demonstra domínio de aritmética de hardware. **(Ponto extra)**
+**Bônus — Implementação Shift-Add:** Em vez de usar o operador `*` (que o Quartus
+mapeia para blocos DSP), implementar cada uma das 8 multiplicações
+`(x[k] + x[15-k]) × h[k]` usando apenas deslocamentos (`<<`, `>>`) e somas.
+Demonstra domínio de aritmética de hardware e economiza DSPs. **(Ponto extra)**
 
 #### Gerando os Coeficientes
 
@@ -204,9 +273,22 @@ Instruções detalhadas em [`docs/workflow_git.md`](docs/workflow_git.md). Resum
 
 ## Simulação
 
-Todos os módulos devem ser simuláveis com o **ModelSim** incluído no Quartus Prime Lite 18.1.
+A simulação funcional (ModelSim, incluído no Quartus Prime Lite 18.1) é exigida
+apenas para os blocos **FIR** e **SPI DAC**:
+
+- **`tb_fir_notch.v`**: aplicar uma entrada representativa (ex.: soma de uma
+  senoide de 60 Hz com uma senoide de 1 kHz) e verificar que a componente de
+  60 Hz aparece atenuada na saída.
+- **`tb_spi_dac.v`**: para uma amostra de entrada conhecida, verificar que
+  `spi_clk`, `spi_mosi` e `spi_cs_n` geram o frame de 16 bits esperado pelo
+  MCP4921 (`[0][BUF][/GA][/SHDN][D11..D0]`).
+
+O wrapper do ADC (Bloco 1) não precisa de testbench — sua validação é feita por
+síntese e teste em hardware (sinal de entrada conhecido + osciloscópio na saída
+do DAC).
 
 Para compilar e simular um testbench no ModelSim (linha de comando):
+
 ```tcl
 vlib work
 vlog rtl/fir/fir_notch.v tb/tb_fir_notch.v
@@ -214,24 +296,6 @@ vsim -novopt tb_fir_notch
 add wave *
 run -all
 ```
-
-O testbench deve, no mínimo:
-- Aplicar estímulos representativos (ex: senoide de 60 Hz + senoide de 1 kHz para o FIR)
-- Verificar a saída com `$display` ou comparação com valores esperados
-- Finalizar com `$finish`
-
----
-
-## Critérios de Avaliação
-
-| Critério | Peso |
-|----------|------|
-| Módulo RTL funcional (simulação passa) | 40% |
-| Testbench adequado | 20% |
-| Síntese sem erros no Quartus | 20% |
-| Pull Request organizado e descrição clara | 10% |
-| Apresentação oral | 10% |
-| **Bônus:** FIR com shift-add | +10% |
 
 ---
 
