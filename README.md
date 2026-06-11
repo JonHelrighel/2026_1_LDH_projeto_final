@@ -2,7 +2,7 @@
 
 **Curso:** Engenharia de Controle e Automação — IFSC Chapecó  
 **Unidade Curricular:** Linguagens de Descrição de Hardware (LDH)  
-**Semestre:** 2026/2  
+**Semestre:** 2026/1  
 **Avaliação:** Nota M3
 
 ---
