@@ -5,4 +5,5 @@ quartus/timing/stamp
 quartus/board/ibis
 quartus/output_files
 quartus/simulation/modelsim
+*.bak
 
