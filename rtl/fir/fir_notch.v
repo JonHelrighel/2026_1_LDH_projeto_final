@@ -1,66 +1,78 @@
+`include "coeff_pkg.vh"
+
 module fir_notch (
-    input wire clk,
-    input wire rst_n,
-    input wire [11:0] data_in,     // de ADC (12-bit)
-    input wire valid_in,
-    output reg [11:0] data_out,
-    output reg valid_out
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire [11:0] entrada,
+    input  wire        nova_amostra,
+    output reg  [11:0] saida,
+    output reg         saida_valida
 );
 
-    import coeff_pkg::*;
+    reg signed [15:0] x0,  x1,  x2,  x3;
+    reg signed [15:0] x4,  x5,  x6,  x7;
+    reg signed [15:0] x8,  x9,  x10, x11;
+    reg signed [15:0] x12, x13, x14, x15;
 
-    // Delay line: 16 amostras (12-bit + sign extend se necessário)
-    reg signed [15:0] delay[0:15];  // maior bit width para segurança
+    reg signed [31:0] soma;
+    reg [2:0] par;
+    reg calculando;
 
-    // Acumulador (largura suficiente: ~16 + log2(16) + 16 bits coef ~ 30-32 bits)
-    reg signed [31:0] acc;
-    reg [3:0] k;                    // contador 0..7
-    reg processing;
-
-    wire signed [15:0] x_sym;       // x[k] + x[15-k]
-    wire signed [31:0] prod;        // multiplicação (ou shift-add no bônus)
-
-    // Shift register quando valid_in
+    // Shift register
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i=0; i<16; i++) delay[i] <= 16'd0;
-            acc <= 32'd0;
-            k <= 4'd0;
-            processing <= 1'b0;
-            valid_out <= 1'b0;
-            data_out <= 12'd0;
+            x0  <= 0; x1  <= 0; x2  <= 0; x3  <= 0;
+            x4  <= 0; x5  <= 0; x6  <= 0; x7  <= 0;
+            x8  <= 0; x9  <= 0; x10 <= 0; x11 <= 0;
+            x12 <= 0; x13 <= 0; x14 <= 0; x15 <= 0;
+        end else if (nova_amostra && !calculando) begin
+            x15 <= x14; x14 <= x13; x13 <= x12;
+            x12 <= x11; x11 <= x10; x10 <= x9;
+            x9  <= x8;  x8  <= x7;  x7  <= x6;
+            x6  <= x5;  x5  <= x4;  x4  <= x3;
+            x3  <= x2;  x2  <= x1;  x1  <= x0;
+            x0  <= {{4{entrada[11]}}, entrada};
+        end
+    end
+
+    // MAC sequencial
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            soma         <= 0;
+            par          <= 0;
+            calculando   <= 0;
+            saida        <= 0;
+            saida_valida <= 0;
         end else begin
-            valid_out <= 1'b0;
+            saida_valida <= 0;
 
-            if (valid_in && !processing) begin
-                // Desloca delay line
-                for (int i=15; i>0; i--) delay[i] <= delay[i-1];
-                delay[0] <= { {4{data_in[11]}}, data_in };  // sign extend 12->16
-
-                processing <= 1'b1;
-                acc <= 32'd0;
-                k <= 4'd0;
+            if (nova_amostra && !calculando) begin
+                soma       <= 0;
+                par        <= 0;
+                calculando <= 1;
             end
 
-            if (processing) begin
-                // Par simétrico
-                x_sym <= delay[k] + delay[15 - k];
+            if (calculando) begin
+                case (par)
+                    0: soma <= soma + (x0  + x15) * `H0;
+                    1: soma <= soma + (x1  + x14) * `H1;
+                    2: soma <= soma + (x2  + x13) * `H2;
+                    3: soma <= soma + (x3  + x12) * `H3;
+                    4: soma <= soma + (x4  + x11) * `H4;
+                    5: soma <= soma + (x5  + x10) * `H5;
+                    6: soma <= soma + (x6  + x9 ) * `H6;
+                    7: soma <= soma + (x7  + x8 ) * `H7;
+                endcase
 
-                // Multiplicação (padrão) ou shift-add no bônus
-                prod <= x_sym * h[k];          // Quartus mapeia para DSP
-
-                acc <= acc + prod;
-
-                if (k == 4'd7) begin
-                    // Fim do processamento
-                    processing <= 1'b0;
-                    // Saída: saturate/truncate para 12-bit
-                    data_out <= acc[27:16];     // ajuste bits conforme teste (evita overflow)
-                    valid_out <= 1'b1;
+                if (par == 7) begin
+                    saida        <= soma[27:16];
+                    saida_valida <= 1;
+                    calculando   <= 0;
                 end else begin
-                    k <= k + 1;
+                    par <= par + 1;
                 end
             end
         end
     end
+
 endmodule
