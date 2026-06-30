@@ -1,12 +1,20 @@
 `define coeff_pkg.vh
 
-// Coeficientes do filtro FIR notch (simétrico, 8 valores)
+`define H0  16'd100
+`define H1  16'd150
+`define H2  16'd200
+`define H3  16'd250
+`define H4  16'd300
+`define H5  16'd350
+`define H6  16'd400
+`define H7  16'd450
+`define H8  16'd450
+`define H9  16'd400
+`define H10 16'd350
+`define H11 16'd300
+`define H12 16'd250
+`define H13 16'd200
+`define H14 16'd150
+`define H15 16'd100
 
-`define H0 16'sd100
-`define H1 16'sd200
-`define H2 16'sd300
-`define H3 16'sd400
-`define H4 16'sd400
-`define H5 16'sd300
-`define H6 16'sd200
-`define H7 16'sd10
+// Coeficientes do filtro FIR notch (16 valores)
